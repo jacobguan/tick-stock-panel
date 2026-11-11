@@ -20,6 +20,7 @@
 - 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
 - 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
 - 后端源码扩展注册：`backend/app/custom/<module>.py`，支持 FastAPI 路由、启动钩子和通知格式化器。
+- 核心 AI 工具调用（已实现）：`app.services.ai_provider.generate_ai_text_with_tools` 接收调用方的工具 schema 与异步执行回调，统一支持 OpenAI Chat Completions / Responses 与 Codex CLI 结构化输出。策略迭代与可选 AI 助手共用核心适配；核心不依赖 `app.custom.assistant`，其他扩展可传入自己的工具，无需注册进助手目录。接入示例见下文「复用核心 AI 工具调用」。
 - 外部后端扩展包及配套页面安装：`data/extensions/<id>/versions/<version>/`，复用现有注册契约，静态预览、重启生效、失败保留旧版本。入口为「设置 → 导入与备份」，见 [统一导入与外部后端扩展包](extension-packages.md)。
 - 当前前端插槽：`layout.navigation.extra`、`stock-preview.tabs`、`stock-preview.footer`、`watchlist.toolbar`。
 - 当前后端继承点：`NotificationFormatter`。
@@ -302,6 +303,36 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 - 扩展只需要装饰默认结果，而不是完全替换算法。
 - 依赖缓存、仓库或通知服务，需要通过明确构造参数注入。
 
+### 4.5 复用核心 AI 工具调用
+
+其他扩展通过已有公共函数调用 AI 工具循环，不需要启用 AI 助手扩展：
+
+```python
+from app.services.ai_provider import generate_ai_text_with_tools, supports_ai_tools
+
+async def execute_tool(name: str, args: dict) -> dict:
+    # 调用方负责校验参数、限制可用工具及处理权限和动作确认。
+    if name != "lookup_local_status":
+        return {"ok": False, "error": "未知工具"}
+    return {"ok": True, "result": {"status": "ready"}}
+
+async def query_status() -> list[dict]:
+    if not supports_ai_tools():
+        raise RuntimeError("当前 AI 接入不支持工具调用")
+    return await generate_ai_text_with_tools(
+        [{"role": "user", "content": "查询本地状态"}],
+        [{"type": "function", "function": {
+            "name": "lookup_local_status",
+            "description": "读取扩展的本地状态",
+            "parameters": {"type": "object", "properties": {}},
+        }}],
+        execute_tool=execute_tool,
+        max_rounds=4,
+    )
+```
+
+返回值为完整消息列表，保留 `assistant.tool_calls`、`tool_call_id` 与工具返回值；最后一条消息不保证是正文（轮次预算用尽时可能停在工具结果），调用方须检查是否得到最终答案。`supports_ai_tools` 只描述当前适配器的协议能力，模型或 CLI 不兼容时仍会明确报错。工具实际执行始终交给注入的回调；该接口不会替扩展授权动作，也不会自动发布策略或把无效工具响应当成成功。
+
 ## 5. 直接修改源码
 
 扩展点不是限制。核心流程必须变化时允许直接修改源码，但要把升级成本显式管理。
@@ -435,7 +466,7 @@ python3 scripts/upgrade_check.py <目标Tag或分支>
 
 ### 8.1 安装包升级保护（非 Git 用户）
 
-桌面安装包与 Docker 镜像的发布携带全量程序文件清单（`app/upgrade_manifest.json`，构建时生成）。后端每次启动会扫描程序目录并与清单对比，把用户「修改/新增」的程序文件常备备份到 `data/upgrade_guard/live/`——`data/` 不随升级覆盖，因此升级不会丢失这些文件。
+桌面安装包与 Docker 镜像的发布携带全量程序文件清单（`app/upgrade_manifest.json`，构建时生成）。后端每次启动会扫描程序目录并与清单对比，把用户「修改/新增」的程序文件备份到 `data/upgrade_guard/snapshots/`。**自动快照只保留最近一次成功备份**：先完整写入新副本，再原子更新状态指向新副本，最后删除旧副本。复制、报告生成或状态写入失败时保留上一份完整备份，不推进版本记录，可修复问题后重新扫描。旧版 `live/` 目录会在首次成功备份后迁入此机制。
 
 检测到版本变化（上次运行版本 ≠ 当前版本）时生成升级对比报告，在「设置 → 系统设置 → 升级保护」展示：
 
@@ -445,6 +476,8 @@ python3 scripts/upgrade_check.py <目标Tag或分支>
 - **新增文件可恢复**：用户新建的文件新版没有（如更换 Docker 镜像）。
 
 守卫不自动合并代码（自动改写程序文件风险不可控）。修改程序文件后重启或点「重新扫描」即可刷新常备备份；源码运行（无清单）时功能自动停用，Git 工作流仍以 `upgrade_check.py` 预检为准。
+
+升级报告及其文件归档也只保留最近一份，新报告和快照成功提交后清理更早的自动归档；普通重扫或点击「知道了」不会删除最近一份升级归档。中断写入遗留的自动副本会在下一次成功扫描后清理，清理失败时接口会报错并保留已提交的完整快照，之后可重扫。此保留策略仅作用于 `data/upgrade_guard/`，不清理手动导出的配置 ZIP 或其他备份目录。
 
 ## 9. 完成检查表
 
