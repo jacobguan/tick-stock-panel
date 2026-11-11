@@ -156,7 +156,17 @@ def test_existing_strategies_in_repo_all_pass():
         pytest.skip("no strategy files present")
 
     for path in files:
-        AIStrategyGenerator._validate_safety(path.read_text(encoding="utf-8"))
+        # 与 StrategyEngine._load_file 的辅助模块契约一致：同目录 `_*.py`
+        # 允许被策略导入，依赖文件本身仍按基础白名单校验。
+        dependency_names = frozenset(
+            candidate.stem
+            for candidate in path.parent.glob("_*.py")
+            if candidate != path
+        )
+        AIStrategyGenerator._validate_safety(
+            path.read_text(encoding="utf-8"),
+            extra_allowed_import_modules=dependency_names,
+        )
 
 
 # ================================================================
